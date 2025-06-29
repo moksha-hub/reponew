@@ -1541,42 +1541,634 @@ class RepoMasterAgent:
 # Usage Example and Main Entry Point
 # ==============================================================================
 
+# Continuation from the main function and additional components
+
 async def main():
     """Example usage of RepoMaster"""
-    
     # Configuration
     llm_config = {
-        "config_list": [{
-            "model": "claude-3-5-sonnet-20241022",
-            "api_key": os.getenv("ANTHROPIC_API_KEY"),
-            "base_url": "https://api.anthropic.com"
-        }],
-        "timeout": 2000,
-        "temperature": 0.1,
+        'config_list': [{
+            'model': 'claude-3-5-sonnet-20241022',
+            'api_key': os.getenv('ANTHROPIC_API_KEY'),
+            'temperature': 0.1,
+            'max_tokens': 4000,
+            'timeout': 2000
+        }]
     }
     
     code_execution_config = {
-        "work_dir": "workspace",
-        "use_docker": False,
-        "timeout": 7200,
-        "use_venv": True
+        'work_dir': 'workspace',
+        'use_docker': False,
+        'timeout': 7200,
+        'use_venv': True
     }
     
     explorer_config = {
-        "max_turns": 40,
-        "function_call": True,
-        "repo_init": True,
-        "max_context_length": 8000
+        'max_turns': 40,
+        'function_call': True,
+        'repo_init': True,
+        'max_context_length': 8000,
+        'compression_ratio': 0.3
     }
-    
+
     # Initialize RepoMaster
     repo_master = RepoMasterAgent(
         llm_config=llm_config,
         code_execution_config=code_execution_config,
-        explorer_config=explorer_config
+        explorer_config=explorer_config,
+        github_token=os.getenv('GITHUB_TOKEN')
     )
-    
-    # Example task
+
+    # Example task - you can modify this based on your needs
     task = """
-    I need to transfer the style
+    I need to implement a web scraper that can handle JavaScript-rendered pages. 
+    Find a repository that demonstrates how to use Selenium or similar tools for 
+    web scraping, and help me adapt it to scrape product information from an 
+    e-commerce website including prices, descriptions, and availability status.
     """
+
+    try:
+        # Execute the task
+        print("Starting RepoMaster task execution...")
+        result = await repo_master.solve_task_with_repo(task)
+        
+        # Display results
+        print("\n" + "="*80)
+        print("TASK EXECUTION RESULTS")
+        print("="*80)
+        
+        if result.get('success'):
+            print(f"✅ Task completed successfully!")
+            print(f"Repository used: {result.get('repository_name', 'Unknown')}")
+            print(f"Execution time: {result.get('execution_time', 'Unknown')} seconds")
+            
+            if result.get('generated_code'):
+                print(f"\n📝 Generated Code:")
+                print("-" * 40)
+                print(result['generated_code'])
+            
+            if result.get('execution_output'):
+                print(f"\n🏃 Execution Output:")
+                print("-" * 40)
+                print(result['execution_output'])
+                
+            if result.get('files_modified'):
+                print(f"\n📁 Modified Files:")
+                for file_path in result['files_modified']:
+                    print(f"  - {file_path}")
+                    
+        else:
+            print(f"❌ Task failed: {result.get('error', 'Unknown error')}")
+            
+        # Display token usage statistics
+        if result.get('token_stats'):
+            stats = result['token_stats']
+            print(f"\n📊 Token Usage Statistics:")
+            print(f"  Total tokens used: {stats.get('total_tokens', 0):,}")
+            print(f"  Average tokens per step: {stats.get('avg_tokens_per_step', 0):,}")
+            print(f"  Context compression ratio: {stats.get('compression_ratio', 0):.2%}")
+
+    except Exception as e:
+        print(f"❌ Error during task execution: {e}")
+        import traceback
+        traceback.print_exc()
+
+# Additional Helper Classes and Methods
+
+class TokenUsageTracker:
+    """Track token usage throughout the exploration process"""
+    
+    def __init__(self):
+        self.total_tokens = 0
+        self.step_tokens = []
+        self.context_sizes = []
+        
+    def add_usage(self, tokens: int, context_size: int = 0):
+        """Add token usage for a step"""
+        self.total_tokens += tokens
+        self.step_tokens.append(tokens)
+        if context_size > 0:
+            self.context_sizes.append(context_size)
+            
+    def get_stats(self) -> Dict[str, Any]:
+        """Get usage statistics"""
+        return {
+            'total_tokens': self.total_tokens,
+            'avg_tokens_per_step': sum(self.step_tokens) / len(self.step_tokens) if self.step_tokens else 0,
+            'max_tokens_step': max(self.step_tokens) if self.step_tokens else 0,
+            'min_tokens_step': min(self.step_tokens) if self.step_tokens else 0,
+            'avg_context_size': sum(self.context_sizes) / len(self.context_sizes) if self.context_sizes else 0,
+            'compression_ratio': 1 - (sum(self.context_sizes) / (self.total_tokens * 4)) if self.total_tokens > 0 else 0
+        }
+
+# Enhanced RepoMasterAgent with missing methods
+class EnhancedRepoMasterAgent(RepoMasterAgent):
+    """Enhanced RepoMaster with additional features from the paper"""
+    
+    def __init__(self, llm_config: Dict, code_execution_config: Dict, explorer_config: Dict, github_token: str = None):
+        super().__init__(llm_config, code_execution_config, explorer_config, github_token)
+        self.token_tracker = TokenUsageTracker()
+        self.execution_history = []
+        
+    async def solve_task_with_repo(self, task_description: str) -> Dict[str, Any]:
+        """Enhanced task solving with detailed tracking and error recovery"""
+        start_time = time.time()
+        
+        try:
+            # Step 1: Repository Discovery
+            print("🔍 Searching for relevant repositories...")
+            repositories = await self.repo_searcher.search_repositories(
+                task_description, max_repos=self.explorer_config.max_repos
+            )
+            
+            if not repositories:
+                return {
+                    'success': False,
+                    'error': 'No relevant repositories found',
+                    'execution_time': time.time() - start_time
+                }
+            
+            print(f"Found {len(repositories)} candidate repositories")
+            
+            # Step 2: Repository Analysis and Ranking
+            analysis_results = []
+            for i, repo in enumerate(repositories[:3]):  # Analyze top 3
+                print(f"📊 Analyzing repository {i+1}/{min(3, len(repositories))}: {repo.name}")
+                
+                try:
+                    # Clone repository
+                    repo_path = await self.repo_manager.clone_repository(repo.url, repo.name.split('/')[-1])
+                    
+                    # Analyze structure
+                    analyzer = CodeStructureAnalyzer()
+                    analysis = analyzer.analyze_repository(repo_path)
+                    
+                    # Initialize explorer
+                    explorer = CodeExplorer(
+                        repo_path=repo_path,
+                        llm=self.llm,
+                        config=self.explorer_config,
+                        analysis_result=analysis
+                    )
+                    
+                    # Get initial context
+                    context = await explorer.initialize_exploration(repo)
+                    
+                    # Calculate relevance score
+                    relevance_score = await self._calculate_repo_relevance(repo, task_description, context)
+                    
+                    analysis_results.append({
+                        'repository': repo,
+                        'path': repo_path,
+                        'analysis': analysis,
+                        'explorer': explorer,
+                        'context': context,
+                        'relevance_score': relevance_score
+                    })
+                    
+                except Exception as e:
+                    print(f"⚠️ Failed to analyze {repo.name}: {e}")
+                    continue
+            
+            if not analysis_results:
+                return {
+                    'success': False,
+                    'error': 'Failed to analyze any repositories',
+                    'execution_time': time.time() - start_time
+                }
+            
+            # Step 3: Select best repository
+            best_result = max(analysis_results, key=lambda x: x['relevance_score'])
+            print(f"🎯 Selected repository: {best_result['repository'].name} (score: {best_result['relevance_score']:.3f})")
+            
+            # Step 4: Execute task with best repository
+            execution_result = await self._execute_task_with_best_repo(
+                task_description, best_result
+            )
+            
+            # Step 5: Compile final results
+            end_time = time.time()
+            
+            return {
+                'success': execution_result.get('success', False),
+                'repository_name': best_result['repository'].name,
+                'repository_url': best_result['repository'].url,
+                'generated_code': execution_result.get('generated_code'),
+                'execution_output': execution_result.get('execution_output'),
+                'files_modified': execution_result.get('files_modified', []),
+                'execution_time': end_time - start_time,
+                'token_stats': self.token_tracker.get_stats(),
+                'error': execution_result.get('error') if not execution_result.get('success') else None
+            }
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': str(e),
+                'execution_time': time.time() - start_time,
+                'token_stats': self.token_tracker.get_stats()
+            }
+    
+    async def _calculate_repo_relevance(self, repo: RepositoryInfo, task: str, context: str) -> float:
+        """Calculate repository relevance score using LLM"""
+        
+        relevance_prompt = f"""
+        Analyze how relevant this repository is for solving the given task.
+        
+        Task: {task}
+        
+        Repository Information:
+        - Name: {repo.name}
+        - Description: {repo.description}
+        - Stars: {repo.stars}
+        - Language: {repo.language}
+        - Topics: {', '.join(repo.topics)}
+        
+        Repository Context:
+        {context[:2000]}...
+        
+        Rate the relevance on a scale of 0.0 to 1.0, where:
+        - 0.0-0.3: Not relevant or minimal relevance
+        - 0.3-0.6: Somewhat relevant, might be useful
+        - 0.6-0.8: Highly relevant, good match
+        - 0.8-1.0: Perfect match, exactly what's needed
+        
+        Consider:
+        1. How well the repository's purpose matches the task
+        2. Code quality and structure
+        3. Documentation and examples
+        4. Maintenance and popularity
+        
+        Respond with only a single number between 0.0 and 1.0.
+        """
+        
+        try:
+            messages = [{'role': 'user', 'content': relevance_prompt}]
+            response = await self.llm.generate_response(messages)
+            score = float(response.strip())
+            self.token_tracker.add_usage(len(relevance_prompt.split()) * 1.3)  # Rough token estimate
+            return max(0.0, min(1.0, score))  # Clamp to valid range
+        except:
+            return 0.5  # Default score if evaluation fails
+    
+    async def _execute_task_with_best_repo(self, task_description: str, result: Dict) -> Dict[str, Any]:
+        """Execute task with enhanced error handling and multi-step approach"""
+        
+        explorer = result['explorer']
+        repo_path = result['path']
+        
+        try:
+            # Setup execution environment
+            print("🔧 Setting up execution environment...")
+            env_setup = await self.task_executor.setup_environment(repo_path)
+            if not env_setup:
+                print("⚠️ Environment setup had issues, continuing anyway...")
+            
+            # Generate comprehensive execution plan
+            print("📋 Generating execution plan...")
+            execution_plan = await self._generate_comprehensive_execution_plan(
+                task_description, result['context'], result['analysis']
+            )
+            
+            # Execute plan with error recovery
+            print("🚀 Executing plan...")
+            execution_result = await self._execute_plan_with_recovery(execution_plan, explorer)
+            
+            return execution_result
+            
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Task execution failed: {str(e)}',
+                'generated_code': None,
+                'execution_output': None
+            }
+    
+    async def _generate_comprehensive_execution_plan(self, task: str, context: str, analysis: Dict) -> Dict[str, Any]:
+        """Generate a more detailed execution plan"""
+        
+        # Get core components for better context
+        core_components = []
+        if 'hct' in analysis:
+            analyzer = CodeStructureAnalyzer()
+            analyzer.hct = analysis['hct']
+            analyzer.fcg = analysis.get('fcg', nx.DiGraph())
+            analyzer.mdg = analysis.get('mdg', nx.DiGraph())
+            analyzer._calculate_importance_scores()
+            core_components = analyzer.get_core_components(10)
+        
+        planning_prompt = f"""
+        Create a detailed execution plan to solve this task using the provided repository.
+        
+        Task: {task}
+        
+        Repository Context:
+        {context}
+        
+        Core Components:
+        {chr(10).join([f"- {comp[0]} (importance: {comp[1]:.3f})" for comp in core_components[:5]])}
+        
+        Create a JSON plan with the following structure:
+        {{
+            "overview": "Brief description of the approach",
+            "steps": [
+                {{
+                    "id": 1,
+                    "action": "explore|script|modify",
+                    "description": "What this step does",
+                    "details": "Specific details or code",
+                    "expected_output": "What should happen",
+                    "error_recovery": "What to do if this fails"
+                }}
+            ],
+            "success_criteria": "How to determine if the task is complete",
+            "deliverables": ["List of expected outputs/files"]
+        }}
+        
+        Action types:
+        - "explore": Examine code, understand structure, find relevant components
+        - "script": Write and execute code to solve the task
+        - "modify": Modify existing files in the repository
+        
+        Make the plan comprehensive but efficient. Focus on understanding the repository
+        structure first, then implementing the solution.
+        """
+        
+        try:
+            messages = [{'role': 'user', 'content': planning_prompt}]
+            response = await self.llm.generate_response(messages)
+            self.token_tracker.add_usage(len(planning_prompt.split()) * 1.3)
+            
+            # Clean response and parse JSON
+            response = response.strip()
+            if response.startswith('```json'):
+                response = response[7:]
+            if response.endswith('```'):
+                response = response[:-3]
+                
+            plan = json.loads(response)
+            return plan
+            
+        except Exception as e:
+            print(f"⚠️ Failed to generate detailed plan: {e}")
+            # Fallback to simple plan
+            return {
+                "overview": "Simple exploration and implementation approach",
+                "steps": [
+                    {
+                        "id": 1,
+                        "action": "explore",
+                        "description": "Explore repository structure and find relevant code",
+                        "details": "Look for main modules and entry points",
+                        "expected_output": "Understanding of codebase structure",
+                        "error_recovery": "Continue with basic file listing"
+                    },
+                    {
+                        "id": 2,
+                        "action": "script",
+                        "description": "Implement solution based on repository patterns",
+                        "details": "Write code that adapts existing patterns for the task",
+                        "expected_output": "Working implementation",
+                        "error_recovery": "Simplify approach and retry"
+                    }
+                ],
+                "success_criteria": "Code runs without errors and produces expected output",
+                "deliverables": ["Working script", "Documentation"]
+            }
+    
+    async def _execute_plan_with_recovery(self, plan: Dict[str, Any], explorer: CodeExplorer) -> Dict[str, Any]:
+        """Execute plan with error recovery and detailed tracking"""
+        
+        execution_log = []
+        generated_files = []
+        all_generated_code = []
+        
+        print(f"📝 Plan Overview: {plan.get('overview', 'No overview provided')}")
+        
+        for step in plan.get('steps', []):
+            step_id = step.get('id', 0)
+            action = step.get('action', '')
+            description = step.get('description', '')
+            
+            print(f"  Step {step_id}: {description}")
+            
+            try:
+                if action == 'explore':
+                    result = await self._execute_exploration_step(step, explorer)
+                elif action == 'script':
+                    result = await self._execute_script_step(step)
+                    if result.get('success') and result.get('code'):
+                        all_generated_code.append(result['code'])
+                elif action == 'modify':
+                    result = await self._execute_modification_step(step)
+                    if result.get('success') and result.get('files'):
+                        generated_files.extend(result['files'])
+                else:
+                    result = {'success': False, 'error': f'Unknown action: {action}'}
+                
+                execution_log.append({
+                    'step_id': step_id,
+                    'action': action,
+                    'description': description,
+                    'success': result.get('success', False),
+                    'output': result.get('output', ''),
+                    'error': result.get('error', '')
+                })
+                
+                if not result.get('success', False):
+                    print(f"    ⚠️ Step failed: {result.get('error', 'Unknown error')}")
+                    # Try error recovery if specified
+                    recovery = step.get('error_recovery', '')
+                    if recovery:
+                        print(f"    🔄 Attempting recovery: {recovery}")
+                        # Implement basic recovery logic here
+                
+            except Exception as e:
+                print(f"    ❌ Step exception: {e}")
+                execution_log.append({
+                    'step_id': step_id,
+                    'action': action,
+                    'description': description,
+                    'success': False,
+                    'error': str(e)
+                })
+        
+        # Determine overall success
+        successful_steps = sum(1 for log in execution_log if log['success'])
+        total_steps = len(execution_log)
+        success_rate = successful_steps / total_steps if total_steps > 0 else 0
+        
+        overall_success = success_rate >= 0.7  # At least 70% steps successful
+        
+        return {
+            'success': overall_success,
+            'execution_log': execution_log,
+            'success_rate': success_rate,
+            'generated_code': '\n\n'.join(all_generated_code) if all_generated_code else None,
+            'files_modified': generated_files,
+            'execution_output': f"Completed {successful_steps}/{total_steps} steps successfully"
+        }
+
+# Enhanced execution methods with better error handling
+    async def _execute_exploration_step(self, step: Dict, explorer: CodeExplorer) -> Dict[str, Any]:
+        """Execute code exploration step with enhanced context"""
+        try:
+            query = step.get('description', '') + ' ' + step.get('details', '')
+            result = await explorer.explore_code(query)
+            
+            return {
+                'success': True,
+                'output': result,
+                'exploration_data': result
+            }
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Exploration failed: {str(e)}',
+                'output': ''
+            }
+
+    async def _execute_script_step(self, step: Dict) -> Dict[str, Any]:
+        """Execute script step with code generation if needed"""
+        try:
+            code = step.get('details', '')
+            
+            # If no code provided, generate it based on description
+            if not code or len(code.strip()) < 20:
+                code = await self._generate_code_for_step(step)
+            
+            if code:
+                result = await self.task_executor.execute_code(code)
+                return {
+                    'success': result.get('success', False),
+                    'output': result.get('output', ''),
+                    'error': result.get('stderr', ''),
+                    'code': code
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': 'No code to execute',
+                    'output': ''
+                }
+                
+        except Exception as e:
+            return {
+                'success': False,
+                'error': f'Script execution failed: {str(e)}',
+                'output': ''
+            }
+
+    async def _generate_code_for_step(self, step: Dict) -> str:
+        """Generate code for a step based on its description"""
+        code_prompt = f"""
+        Generate Python code to accomplish this task step:
+        
+        Description: {step.get('description', '')}
+        Details: {step.get('details', '')}
+        Expected Output: {step.get('expected_output', '')}
+        
+        Write clean, working Python code that accomplishes this step.
+        Include error handling and comments.
+        Only return the code, no explanations.
+        """
+        
+        try:
+            messages = [{'role': 'user', 'content': code_prompt}]
+            response = await self.llm.generate_response(messages)
+            self.token_tracker.add_usage(len(code_prompt.split()) * 1.3)
+            
+            # Clean up the response
+            code = response.strip()
+            if code.startswith('```python'):
+                code = code[9:]
+            elif code.startswith('```'):
+                code = code[3:]
+            if code.endswith('```'):
+                code = code[:-3]
+                
+            return code.strip()
+            
+        except Exception as e:
+            print(f"⚠️ Code generation failed: {e}")
+            return ""
+
+# CLI Interface
+def create_cli():
+    """Create command-line interface for RepoMaster"""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="RepoMaster: Autonomous Repository Exploration")
+    parser.add_argument("task", help="Task description to solve")
+    parser.add_argument("--model", default="claude-3-5-sonnet-20241022", help="LLM model to use")
+    parser.add_argument("--max-repos", type=int, default=5, help="Maximum repositories to analyze")
+    parser.add_argument("--work-dir", default="workspace", help="Working directory")
+    parser.add_argument("--timeout", type=int, default=7200, help="Execution timeout in seconds")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Verbose output")
+    
+    return parser
+
+async def cli_main():
+    """CLI entry point"""
+    parser = create_cli()
+    args = parser.parse_args()
+    
+    # Setup logging
+    level = logging.DEBUG if args.verbose else logging.INFO
+    logging.basicConfig(level=level, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Configuration
+    llm_config = {
+        'config_list': [{
+            'model': args.model,
+            'api_key': os.getenv('ANTHROPIC_API_KEY') or os.getenv('OPENAI_API_KEY'),
+            'temperature': 0.1,
+            'max_tokens': 4000,
+            'timeout': 2000
+        }]
+    }
+    
+    code_execution_config = {
+        'work_dir': args.work_dir,
+        'use_docker': False,
+        'timeout': args.timeout,
+        'use_venv': True
+    }
+    
+    explorer_config = {
+        'max_turns': 40,
+        'function_call': True,
+        'repo_init': True,
+        'max_context_length': 8000,
+        'compression_ratio': 0.3,
+        'max_repos': args.max_repos
+    }
+
+    # Initialize and run
+    repo_master = EnhancedRepoMasterAgent(
+        llm_config=llm_config,
+        code_execution_config=code_execution_config,
+        explorer_config=explorer_config,
+        github_token=os.getenv('GITHUB_TOKEN')
+    )
+
+    result = await repo_master.solve_task_with_repo(args.task)
+    
+    # Output results
+    if result.get('success'):
+        print(f"\n✅ Task completed successfully!")
+        print(f"Repository: {result.get('repository_name')}")
+        if result.get('generated_code'):
+            print(f"\nGenerated Code:\n{'-'*40}")
+            print(result['generated_code'])
+    else:
+        print(f"\n❌ Task failed: {result.get('error')}")
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1:
+        # CLI mode
+        asyncio.run(cli_main())
+    else:
+        # Interactive mode
+        asyncio.run(main())
